@@ -4,6 +4,8 @@
 --  Derived from reverse-engineered Network tree + DataController.___X
 --      (server-mirrored player data). Remote names verified 2026-10.
 --  Fixes applied: v4 audit — 17 bugs patched (6 crit, 4 high, 5 med, 2 low)
+--  v5: compact GUI, minimize/restore fixed, dead toggles shown as [N/A],
+--      Collect/Place split, close stops the farm, event slot + remote dump
 --====================================================================
 
 local Players = game:GetService("Players")
@@ -134,6 +136,7 @@ local CFG = {
     autoBoost   = true,
     autoGrade   = true,
     autoTrait   = true,
+    autoEvent   = true,          -- only does something once EVENT_REMOTES is filled in
     gradeMin    = 3,
     traitMin    = 1.5,
 }
@@ -444,7 +447,7 @@ end
 local UPGRADE_LINES = {}
 if UpgradeConfig then
     for name, def in pairs(UpgradeConfig) do
-        local cat, roman = name:match("^(.-)%s+([IVXLM]+)$")
+        local cat, roman = name:match("^(.-)%s+([IVXLCDM]+)$")
         if cat and roman and def.price then
             UPGRADE_LINES[cat] = UPGRADE_LINES[cat] or {}
             table.insert(UPGRADE_LINES[cat], {
@@ -597,7 +600,8 @@ local function doCodes()
     local d = data()
     local redeemed = d.RedeemedCodes or {}
     local did = 0
-    for code in pairs(CODES) do
+    for k, v in pairs(CODES) do
+        local code = type(v) == "string" and v or k                -- list {"CODE", ...} or map {CODE = {...}}
         if type(code) == "string" and not redeemed[code] then
             pcall(function() R.RedeemCode:FireServer(code) end)
             did = did + 1
@@ -712,344 +716,276 @@ local function useBoosts()
 end
 
 --====================================================================
---  GUI   (all GUI bugs fixed: C-4, C-6, M-1, M-3, L-1)
+--  EVENT   (v5)
+--  This script does not know the new event's remote names. Press
+--  "Dump Remotes" in the GUI: it lists every remote under Network the
+--  script does not use yet (console + clipboard). Put the event ones here.
+--====================================================================
+local EVENT_REMOTES = {
+    -- { "SomeEventService.RE.Claim" },
+    -- { "SomeEventService.RF.Exchange", args = { "ItemName", 1 } },
+}
+
+local USED = {}
+for _, r in pairs(R) do USED[r] = true end
+
+local EVENT = {}
+for _, e in ipairs(EVENT_REMOTES) do
+    local r = svc(e[1])
+    if r then
+        table.insert(EVENT, { remote = r, args = e.args or {} })
+    else
+        warn("[PESONA] event remote not found: " .. tostring(e[1]))
+    end
+end
+
+local function dumpRemotes()
+    local prefix = #Network:GetFullName() + 2
+    local out = {}
+    for _, r in ipairs(Network:GetDescendants()) do
+        local c = r.ClassName
+        if (c == "RemoteEvent" or c == "UnreliableRemoteEvent" or c == "RemoteFunction") and not USED[r] then
+            table.insert(out, c .. "  " .. r:GetFullName():sub(prefix))
+        end
+    end
+    table.sort(out)
+    print("[PESONA] remotes not used by this script (" .. #out .. "):")
+    for _, line in ipairs(out) do print(line) end                 -- one print per remote: long prints get cut off
+    local copied = type(setclipboard) == "function" and pcall(setclipboard, table.concat(out, "\n"))
+    return #out, copied
+end
+
+local function doEvent()
+    for _, e in ipairs(EVENT) do
+        pcall(function()
+            if e.remote:IsA("RemoteFunction") then
+                e.remote:InvokeServer(table.unpack(e.args))
+            else
+                e.remote:FireServer(table.unpack(e.args))
+            end
+        end)
+        task.wait(0.3)
+    end
+end
+
+-- remotes a toggle cannot work without; if a game update renamed one, the toggle shows [N/A]
+local NEEDS = {
+    autoRoll    = { "RollDice" },
+    autoSpins   = { "UseSpin" },
+    autoCollect = { "CollectBalance" },
+    autoPlace   = { "EquipBest" },
+    autoLevel   = { "LevelUpSlot" },
+    autoDice    = { "BuyDice", "EquipDice" },
+    autoUpgrade = { "BuyUpgrade" },
+    autoRebirth = { "Rebirth" },
+    autoSell    = { "SellInventory" },
+    autoTower   = { "PlayTower", "CompleteFloor" },
+    autoBoost   = { "BoostUse" },
+    autoGrade   = { "GradeRoll" },
+    autoTrait   = { "TraitRoll" },
+    autoCodes   = { "RedeemCode" },
+}
+
+-- config modules a toggle cannot work without (req() returns nil silently).
+-- Grade/Trait matter most: without their table every unit reads as multiplier 0 and gets rerolled forever.
+local MISSING_CFG = {
+    autoCodes   = not CODES and "CodesConfig",
+    autoSell    = not UnitConfig and "UnitConfig",
+    autoDice    = not DICE[1] and "Dice",
+    autoUpgrade = not UpgradeConfig and "Upgrades",
+    autoBoost   = not BoostCfg and "BoostConfig",
+    autoGrade   = not Grades and "Grades",
+    autoTrait   = not Traits and "Traits",
+}
+
+local function missingFor(key)
+    if key == "autoEvent" and #EVENT == 0 then return "EVENT_REMOTES empty" end
+    if MISSING_CFG[key] then return MISSING_CFG[key] end
+    for _, name in ipairs(NEEDS[key] or {}) do
+        if not R[name] then return name end
+    end
+    return nil
+end
+
+--====================================================================
+--  GUI   (v5: compact, everything below the title bar lives in `body`)
 --====================================================================
 local function buildGUI()
-    local pg = LP:WaitForChild("PlayerGui")
-    local sg = Instance.new("ScreenGui")
-    sg.Name = "PesonaAnimeDice"
-    sg.ResetOnSpawn = false
-    sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-    sg.Parent = pg
+    local W, TITLE_H, FULL_H = 230, 28, 310      -- fits a 320px-tall phone screen
+    local ON   = Color3.fromRGB(0, 150, 110)
+    local OFF  = Color3.fromRGB(38, 42, 58)
+    local DEAD = Color3.fromRGB(60, 34, 34)
+    local WHITE = Color3.new(1, 1, 1)
+
+    local function mk(class, props, parent)
+        local o = Instance.new(class)
+        for k, v in pairs(props) do o[k] = v end
+        o.Parent = parent
+        return o
+    end
+    local function round(o, r) mk("UICorner", { CornerRadius = UDim.new(0, r) }, o) end
+
+    local sg = mk("ScreenGui", {
+        Name = "PesonaAnimeDice", ResetOnSpawn = false, ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+    }, LP:WaitForChild("PlayerGui"))
     _G.__PESONA_AD_GUI = sg
 
-    local main = Instance.new("Frame")
-    main.Size = UDim2.new(0, 320, 0, 600)                         -- [M-3] fix: taller to fit stacked panels
-    main.Position = UDim2.new(0, 20, 0.5, -300)
-    main.BackgroundColor3 = Color3.fromRGB(16, 18, 26)
-    main.BorderSizePixel = 0
-    main.Active = true
-    main.Parent = sg
-    local corner = Instance.new("UICorner"); corner.CornerRadius = UDim.new(0, 8); corner.Parent = main
-    local stroke = Instance.new("UIStroke"); stroke.Color = Color3.fromRGB(0, 220, 255); stroke.Thickness = 1.5; stroke.Parent = main
+    local main = mk("Frame", {
+        Size = UDim2.new(0, W, 0, FULL_H), Position = UDim2.new(0, 12, 0.5, -FULL_H / 2),
+        BackgroundColor3 = Color3.fromRGB(16, 18, 26), BorderSizePixel = 0,
+        Active = true, ClipsDescendants = true,
+    }, sg)
+    round(main, 8)
+    mk("UIStroke", { Color = Color3.fromRGB(0, 220, 255), Thickness = 1.5 }, main)
 
-    -- drag
-    local dragging, dragStart, startPos
-    main.InputBegan:Connect(function(input)
+    -- title bar: the only things parented to `main` besides `body`
+    local title = mk("TextLabel", {
+        Size = UDim2.new(1, -64, 0, TITLE_H), Position = UDim2.new(0, 8, 0, 0),
+        BackgroundTransparency = 1, Active = true,
+        Text = "ANIME DICE • PESONA", TextColor3 = Color3.fromRGB(0, 220, 255),
+        Font = Enum.Font.GothamBold, TextSize = 13, TextXAlignment = Enum.TextXAlignment.Left,
+    }, main)
+    local function titleBtn(text, x, color)
+        return mk("TextButton", {
+            Size = UDim2.new(0, 28, 0, TITLE_H), Position = UDim2.new(1, x, 0, 0),
+            BackgroundTransparency = 1, Text = text, TextColor3 = color,
+            Font = Enum.Font.GothamBold, TextSize = 18,
+        }, main)
+    end
+    local minBtn   = titleBtn("−", -58, WHITE)
+    local closeBtn = titleBtn("×", -28, Color3.new(1, 0.5, 0.5))
+
+    local body = mk("Frame", {
+        Size = UDim2.new(1, 0, 1, -TITLE_H), Position = UDim2.new(0, 0, 0, TITLE_H),
+        BackgroundTransparency = 1,
+    }, main)
+
+    -- drag by the title; movement tracked on UIS so a fast drag does not drop
+    local dragInput, dragStart, startPos
+    title.InputBegan:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            dragging = true; dragStart = input.Position; startPos = main.Position
+            dragInput, dragStart, startPos = input, input.Position, main.Position
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then dragInput = nil end
+            end)
         end
     end)
-    main.InputChanged:Connect(function(input)
-        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+    local moveConn = UIS.InputChanged:Connect(function(input)
+        if dragInput and (input == dragInput or input.UserInputType == Enum.UserInputType.MouseMovement) then
             local delta = input.Position - dragStart
-            main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+            main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X,
+                                      startPos.Y.Scale, startPos.Y.Offset + delta.Y)
         end
     end)
-    UIS.InputEnded:Connect(function(input)                         -- [C-4] fix: UserInput → UIS
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            dragging = false
-        end
-    end)
+    sg.Destroying:Connect(function() moveConn:Disconnect() end)
 
-    -- Forward-declare GUI elements used in minimize handler         [C-6] fix
-    local list, statGrid
+    -- minimize: the old START button was anchored to the bottom of `main`, so when the
+    -- window collapsed it slid over the title bar and swallowed the tap on "−"
     local minimized = false
-    local collapsedH = 42
-    local fullH = 600
-
-    -- minimize + close buttons
-    local minBtn = Instance.new("TextButton")
-    minBtn.Size = UDim2.new(0, 24, 0, 24)
-    minBtn.Position = UDim2.new(1, -54, 0, 4)                     -- moved left to not overlap close
-    minBtn.BackgroundTransparency = 1
-    minBtn.Text = "−"
-    minBtn.TextColor3 = Color3.new(1, 1, 1)
-    minBtn.Font = Enum.Font.GothamBold
-    minBtn.TextSize = 16
-    minBtn.Parent = main
-
-    local closeBtn = Instance.new("TextButton")
-    closeBtn.Size = UDim2.new(0, 26, 0, 26)
-    closeBtn.Position = UDim2.new(1, -26, 0, 4)
-    closeBtn.BackgroundTransparency = 1
-    closeBtn.Text = "×"
-    closeBtn.TextColor3 = Color3.new(1, 0.5, 0.5)
-    closeBtn.Font = Enum.Font.GothamBold
-    closeBtn.TextSize = 18
-    closeBtn.Parent = main
-    closeBtn.MouseButton1Click:Connect(function()
-        pcall(function() sg:Destroy() end)
-        _G.__PESONA_AD_GUI = nil
-    end)
-
-    local title = Instance.new("TextLabel")
-    title.Size = UDim2.new(1, -60, 0, 30)
-    title.Position = UDim2.new(0, 10, 0, 2)
-    title.BackgroundTransparency = 1
-    title.Text = "  ANIME DICE  •  PESONA FARM"
-    title.TextColor3 = Color3.fromRGB(0, 220, 255)
-    title.Font = Enum.Font.GothamBold
-    title.TextSize = 15
-    title.TextXAlignment = Enum.TextXAlignment.Left
-    title.Parent = main
-
-    local status = Instance.new("TextLabel")
-    status.Size = UDim2.new(1, -20, 0, 38)
-    status.Position = UDim2.new(0, 10, 0, 36)
-    status.BackgroundColor3 = Color3.fromRGB(22, 26, 38)
-    status.Text = "money 0  |  /s 0  |  rb 0"
-    status.TextColor3 = Color3.fromRGB(180, 220, 255)
-    status.Font = Enum.Font.Code
-    status.TextSize = 12
-    status.Parent = main
-    status.Name = "StatusLabel"
-    local sc = Instance.new("UICorner"); sc.CornerRadius = UDim.new(0, 6); sc.Parent = status
-    -- [L-1] fix: removed the self-assignment no-op GetPropertyChangedSignal handler
-
-    -- License panel (key input + verify + status badge)
-    local licPanel = Instance.new("Frame")
-    licPanel.Size = UDim2.new(1, -16, 0, 54)
-    licPanel.Position = UDim2.new(0, 8, 0, 78)
-    licPanel.BackgroundColor3 = Color3.fromRGB(28, 32, 44)
-    licPanel.Parent = main
-    local plic = Instance.new("UICorner"); plic.CornerRadius = UDim.new(0, 6); plic.Parent = licPanel
-    local lstroke2 = Instance.new("UIStroke"); lstroke2.Color = Color3.fromRGB(0, 180, 255); lstroke2.Thickness = 1; lstroke2.Parent = licPanel
-
-    local licLabel = Instance.new("TextLabel")
-    licLabel.Size = UDim2.new(1, -6, 0, 14)
-    licLabel.Position = UDim2.new(0, 8, 0, 4)
-    licLabel.BackgroundTransparency = 1
-    licLabel.Text = "LICENSE"
-    licLabel.TextColor3 = Color3.fromRGB(0, 220, 255)
-    licLabel.Font = Enum.Font.GothamBold
-    licLabel.TextSize = 11
-    licLabel.Parent = licPanel
-
-    local keyInput = Instance.new("TextBox")
-    keyInput.Size = UDim2.new(0.46, -8, 0, 20)
-    keyInput.Position = UDim2.new(0, 8, 0, 20)
-    keyInput.PlaceholderText = "Masukkan license key..."
-    keyInput.Text = LICENSE_KEY
-    keyInput.ClearTextOnFocus = false
-    keyInput.BackgroundColor3 = Color3.fromRGB(16, 18, 26)
-    keyInput.TextColor3 = Color3.new(1, 1, 1)
-    keyInput.Font = Enum.Font.Code
-    keyInput.TextSize = 11
-    keyInput.Parent = licPanel
-    local kbox = Instance.new("UICorner"); kbox.CornerRadius = UDim.new(0, 4); kbox.Parent = keyInput
-
-    local verBtn = Instance.new("TextButton")
-    verBtn.Size = UDim2.new(0.46, -8, 0, 20)
-    verBtn.Position = UDim2.new(0.5, 4, 0, 20)
-    verBtn.BackgroundColor3 = Color3.fromRGB(0, 150, 90)
-    verBtn.Text = "VERIFY"
-    verBtn.TextColor3 = Color3.new(1, 1, 1)
-    verBtn.Font = Enum.Font.GothamBold
-    verBtn.TextSize = 11
-    verBtn.Parent = licPanel
-    local vbox = Instance.new("UICorner"); vbox.CornerRadius = UDim.new(0, 4); vbox.Parent = verBtn
-
-    local licBadge = Instance.new("TextLabel")
-    licBadge.Size = UDim2.new(1, -12, 0, 16)
-    licBadge.Position = UDim2.new(0, 6, 0, 42)
-    licBadge.BackgroundTransparency = 1
-    licBadge.Text = "Tier: " .. LICENSE_TIER .. "  |  Exp: " .. LICENSE_EXPIRY
-        .. "  |  Features: " .. countFeatures()                    -- [C-2] fix
-    licBadge.TextColor3 = Color3.fromRGB(120, 180, 220)
-    licBadge.Font = Enum.Font.Code
-    licBadge.TextSize = 10
-    licBadge.Parent = licPanel
-
-    -- [C-1] fix: VERIFY button now re-applies license gate + refreshes toggle visuals
-    local toggleButtons = {}   -- filled by addToggle below; key → button ref
-
-    verBtn.MouseButton1Click:Connect(function()
-        local newKey = keyInput.Text
-        if newKey and newKey ~= "" then
-            LICENSE_KEY = newKey
-            checkLicense()
-            applyLicenseGate()                                     -- [C-1] fix: re-gate after verify
-            licBadge.Text = "Tier: " .. LICENSE_TIER .. "  |  Exp: " .. LICENSE_EXPIRY
-                .. "  |  Features: " .. countFeatures()            -- [C-2] fix
-            if LICENSE_TIER ~= "none" then
-                verBtn.BackgroundColor3 = Color3.fromRGB(0, 150, 90)
-                verBtn.Text = "RE-VERIFY"
-            else
-                verBtn.BackgroundColor3 = Color3.fromRGB(180, 40, 40)
-                verBtn.Text = "✗ INVALID"
-            end
-            -- refresh toggle button visuals after re-gate
-            for key, btn in pairs(toggleButtons) do
-                btn.BackgroundColor3 = CFG[key] and Color3.fromRGB(0, 150, 110) or Color3.fromRGB(38, 42, 58)
-                local label = btn:GetAttribute("_label") or key
-                btn.Text = "  " .. label .. (CFG[key] and "   [ON]" or "   [OFF]")
-            end
-        end
-    end)
-
-    -- stats grid                                                   [M-3] fix: positioned below license panel
-    statGrid = Instance.new("Frame")
-    statGrid.Size = UDim2.new(1, -16, 0, 70)
-    statGrid.Position = UDim2.new(0, 8, 0, 136)                   -- [M-3] fix: 78+54+4 = 136
-    statGrid.BackgroundTransparency = 1
-    statGrid.Name = "StatGrid"
-    statGrid.Parent = main
-    local statLayout = Instance.new("UIListLayout")
-    statLayout.Padding = UDim.new(0, 4)
-    statLayout.SortOrder = Enum.SortOrder.LayoutOrder
-    statLayout.Parent = statGrid
-    for _, li in ipairs({
-        {"ROLLS", "rolled"}, {"COLLECTED", "collected"}, {"SELL", "sold"},
-        {"TOWER FLOOR", "towerBest"}, {"TIER UP", "upgrades"}, {"REBIRTH", "rebirths"},
-        {"CODES", "codesDone"}, {"CLAIMS", "claims"},
-    }) do
-        local lb = Instance.new("TextLabel")
-        lb.Size = UDim2.new(0.5, -2, 0, 16)
-        lb.BackgroundTransparency = 1
-        lb.Text = li[1] .. ": "
-        lb.TextColor3 = Color3.fromRGB(120, 160, 200)
-        lb.Font = Enum.Font.Code
-        lb.TextSize = 11
-        lb.Name = "StatLabel"
-        lb.Parent = statGrid
-    end
-    -- dynamic stat label refs
-    local statLabels = {}
-    for _, child in ipairs(statGrid:GetChildren()) do
-        if child:IsA("TextLabel") and child.Name == "StatLabel" then
-            table.insert(statLabels, child)
-        end
-    end
-    local function refreshStats()
-        if minimized then return end
-        for i, child in ipairs(statLabels) do
-            if i == 1 then child.Text = "ROLLS   " .. fmt(ST.rolled)
-            elseif i == 2 then child.Text = "COLLECT " .. fmt(ST.collected)
-            elseif i == 3 then child.Text = "SELL    " .. fmt(ST.sold)
-            elseif i == 4 then child.Text = "TOWER   " .. fmt(ST.towerBest)
-            elseif i == 5 then child.Text = "TIER UP " .. fmt(ST.upgrades)
-            elseif i == 6 then child.Text = "REBIRTH " .. fmt(ST.rebirths)
-            elseif i == 7 then child.Text = "CODES   " .. fmt(ST.codesDone)
-            elseif i == 8 then child.Text = "CLAIMS  " .. fmt(ST.claims)
-            end
-        end
-    end
-
-    list = Instance.new("ScrollingFrame")                          -- [C-6] fix: assigns to forward-declared local
-    list.Size = UDim2.new(1, -16, 0, 220)
-    list.Position = UDim2.new(0, 8, 0, 210)                       -- [M-3] fix: 136+70+4 = 210
-    list.BackgroundTransparency = 1
-    list.BorderSizePixel = 0
-    list.ScrollBarThickness = 4
-    list.CanvasSize = UDim2.new(0, 0, 0, 0)
-    list.Parent = main
-    local ll = Instance.new("UIListLayout")
-    ll.Padding = UDim.new(0, 4)
-    ll.SortOrder = Enum.SortOrder.LayoutOrder
-    ll.Parent = list
-    ll:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
-        list.CanvasSize = UDim2.new(0, 0, 0, ll.AbsoluteContentSize.Y + 8)
-    end)
-
-    -- [C-6] fix: minimize handler is connected AFTER list and statGrid are created
     minBtn.MouseButton1Click:Connect(function()
         minimized = not minimized
-        main.Size = UDim2.new(0, 320, 0, minimized and collapsedH or fullH)
-        list.Visible = not minimized                               -- [C-6] fix: safe now
-        statGrid.Visible = not minimized                           -- [C-6] fix: safe now
-        if minimized then status.Text = "— minimized —" end       -- [M-1] fix: .Value → .Text
+        body.Visible = not minimized
+        main.Size = UDim2.new(0, W, 0, minimized and TITLE_H or FULL_H)
+        minBtn.Text = minimized and "+" or "−"
     end)
 
-    -- [H-2] fix: toggle handler checks license gate before allowing toggle-on
-    local function addToggle(label, key, order)
-        local b = Instance.new("TextButton")
-        b.Size = UDim2.new(1, -6, 0, 24)
-        b.BackgroundColor3 = CFG[key] and Color3.fromRGB(0, 150, 110) or Color3.fromRGB(38, 42, 58)
-        b.Text = "  " .. label .. (CFG[key] and "   [ON]" or "   [OFF]")
-        b.TextColor3 = Color3.new(1, 1, 1)
-        b.Font = Enum.Font.Gotham
-        b.TextSize = 12
-        b.TextXAlignment = Enum.TextXAlignment.Left
-        b.LayoutOrder = order
-        b.Parent = list
-        b:SetAttribute("_label", label)                            -- store label for verify refresh
-        local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0, 5); c.Parent = b
-        toggleButtons[key] = b                                     -- register for verify refresh
+    -- close also stops every loop (before: GUI gone, farm kept running with no way to stop it)
+    closeBtn.MouseButton1Click:Connect(function()
+        CFG.auto = false
+        if _G.__PESONA_AD == GEN then _G.__PESONA_AD = GEN + 1 end
+        _G.__PESONA_AD_GUI = nil
+        sg:Destroy()
+    end)
+
+    local status = mk("TextLabel", {
+        Size = UDim2.new(1, -12, 0, 42), Position = UDim2.new(0, 6, 0, 0),
+        BackgroundColor3 = Color3.fromRGB(22, 26, 38), Text = "loading...",
+        TextColor3 = Color3.fromRGB(180, 220, 255), Font = Enum.Font.Code, TextSize = 11,
+    }, body)
+    round(status, 6)
+
+    local list = mk("ScrollingFrame", {
+        Size = UDim2.new(1, -12, 1, -88), Position = UDim2.new(0, 6, 0, 46),
+        BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 4,
+        CanvasSize = UDim2.new(0, 0, 0, 0),
+    }, body)
+    local ll = mk("UIListLayout", { Padding = UDim.new(0, 3), SortOrder = Enum.SortOrder.LayoutOrder }, list)
+    ll:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+        list.CanvasSize = UDim2.new(0, 0, 0, ll.AbsoluteContentSize.Y + 4)
+    end)
+
+    local order = 0
+    local function row(text, color)
+        order = order + 1
+        local b = mk("TextButton", {
+            Size = UDim2.new(1, -6, 0, 22), BackgroundColor3 = color, Text = text,
+            TextColor3 = WHITE, Font = Enum.Font.Gotham, TextSize = 12,
+            TextXAlignment = Enum.TextXAlignment.Left, LayoutOrder = order,
+        }, list)
+        round(b, 5)
+        return b
+    end
+
+    local function addToggle(label, key)
+        local missing = missingFor(key)
+        local locked = not GRANTED_FEATURES[key] and table.find(GATED_FEATURES, key) ~= nil
+        if missing or locked then
+            CFG[key] = false
+            row("  " .. label .. (missing and "  [N/A]" or "  [LOCKED]"), DEAD).AutoButtonColor = false
+            if missing then warn("[PESONA] " .. label .. " disabled — missing: " .. missing) end
+            return
+        end
+        local b = row("", OFF)
+        local function paint()
+            b.BackgroundColor3 = CFG[key] and ON or OFF
+            b.Text = "  " .. label .. (CFG[key] and "  [ON]" or "  [OFF]")
+        end
+        paint()
         b.MouseButton1Click:Connect(function()
-            -- [H-2] fix: block toggling ON for license-gated features that aren't granted
-            if not CFG[key] and not GRANTED_FEATURES[key] then
-                -- check if this key is in the gated list
-                local isGated = false
-                for _, gk in ipairs(GATED_FEATURES) do
-                    if gk == key then isGated = true; break end
-                end
-                if isGated then
-                    b.Text = "  " .. label .. "   [LOCKED 🔒]"
-                    b.BackgroundColor3 = Color3.fromRGB(80, 30, 30)
-                    task.delay(1, function()
-                        b.Text = "  " .. label .. "   [OFF]"
-                        b.BackgroundColor3 = Color3.fromRGB(38, 42, 58)
-                    end)
-                    return
-                end
-            end
             CFG[key] = not CFG[key]
-            b.BackgroundColor3 = CFG[key] and Color3.fromRGB(0, 150, 110) or Color3.fromRGB(38, 42, 58)
-            b.Text = "  " .. label .. (CFG[key] and "   [ON]" or "   [OFF]")
+            paint()
         end)
     end
 
-    local order = 0
-    local function nxt() order = order + 1; return order end
     for _, item in ipairs({
-        {"Auto Roll",            "autoRoll"},
-        {"Auto Spins (x100/1k)","autoSpins"},
-        {"Auto Collect + Place", "autoCollect"},
-        {"Auto Level",           "autoLevel"},
-        {"Auto Buy Dice",        "autoDice"},
-        {"Auto Upgrade",         "autoUpgrade"},
-        {"Auto Rebirth",         "autoRebirth"},
-        {"Auto Sell Junk",       "autoSell"},
-        {"Auto Tower",           "autoTower"},
-        {"Auto Boosts",          "autoBoost"},
-        {"Auto Grade Reroll",    "autoGrade"},
-        {"Auto Trait Reroll",    "autoTrait"},
-        {"Auto Codes",           "autoCodes"},
-        {"Auto Claims",          "autoClaims"},
+        { "Auto Roll",         "autoRoll" },
+        { "Auto Spin",         "autoSpins" },
+        { "Auto Collect",      "autoCollect" },
+        { "Auto Place",        "autoPlace" },
+        { "Auto Level",        "autoLevel" },
+        { "Auto Buy Dice",     "autoDice" },
+        { "Auto Upgrade",      "autoUpgrade" },
+        { "Auto Rebirth",      "autoRebirth" },
+        { "Auto Sell Junk",    "autoSell" },
+        { "Auto Tower",        "autoTower" },
+        { "Auto Boost",        "autoBoost" },
+        { "Auto Grade Reroll", "autoGrade" },
+        { "Auto Trait Reroll", "autoTrait" },
+        { "Auto Codes",        "autoCodes" },
+        { "Auto Claims",       "autoClaims" },
+        { "Auto Event",        "autoEvent" },
     }) do
-        addToggle(item[1], item[2], nxt())
+        addToggle(item[1], item[2])
     end
 
-    local master = Instance.new("TextButton")
-    master.Size = UDim2.new(1, -16, 0, 36)
-    master.Position = UDim2.new(0, 8, 1, -48)
-    master.BackgroundColor3 = Color3.fromRGB(0, 170, 90)
-    master.Text = "START AUTO FARM"
-    master.TextColor3 = Color3.new(1, 1, 1)
-    master.Font = Enum.Font.GothamBold
-    master.TextSize = 15
-    master.Parent = main
-    local mc = Instance.new("UICorner"); mc.CornerRadius = UDim.new(0, 6); mc.Parent = master
-
-    master.MouseButton1Click:Connect(function()
-        CFG.auto = not CFG.auto
-        if CFG.auto then
-            master.BackgroundColor3 = Color3.fromRGB(180, 40, 40)
-            master.Text = "STOP AUTO FARM"
-        else
-            master.BackgroundColor3 = Color3.fromRGB(0, 170, 90)
-            master.Text = "START AUTO FARM"
-        end
+    local dumpBtn = row("  Dump Remotes (for event)", Color3.fromRGB(60, 60, 110))
+    dumpBtn.MouseButton1Click:Connect(function()
+        local ok, n, copied = pcall(dumpRemotes)
+        dumpBtn.Text = ok and ("  Dumped " .. n .. (copied and " → clipboard" or " → console"))
+            or "  Dump failed (see console)"
+        if not ok then warn("[PESONA] dump failed: " .. tostring(n)) end
     end)
 
-    -- refresh stats periodically
-    task.spawn(refreshStats)
-    task.spawn(function()
-        while _G.__PESONA_AD == GEN do
-            refreshStats()
-            task.wait(2)
-        end
+    local master = mk("TextButton", {
+        Size = UDim2.new(1, -12, 0, 32), Position = UDim2.new(0, 6, 1, -38),
+        BackgroundColor3 = Color3.fromRGB(0, 170, 90), Text = "START AUTO FARM",
+        TextColor3 = WHITE, Font = Enum.Font.GothamBold, TextSize = 14,
+    }, body)
+    round(master, 6)
+    master.MouseButton1Click:Connect(function()
+        CFG.auto = not CFG.auto
+        master.BackgroundColor3 = CFG.auto and Color3.fromRGB(180, 40, 40) or Color3.fromRGB(0, 170, 90)
+        master.Text = CFG.auto and "STOP AUTO FARM" or "START AUTO FARM"
     end)
 
     return { sg = sg, status = status }
@@ -1060,145 +996,58 @@ end
 --====================================================================
 local ui = buildGUI()
 
-task.spawn(function()
-    while _G.__PESONA_AD == GEN do
-        if CFG.auto and CFG.autoRoll then pcall(doRoll) end
-        task.wait(rollInterval())
-    end
-end)
-
-task.spawn(function()
-    while _G.__PESONA_AD == GEN do
-        if CFG.auto and (CFG.autoCollect or CFG.autoPlace) then    -- [M-2] fix: fire if either is on
-            pcall(doCollectPlace)
+local function loop(interval, fn)
+    task.spawn(function()
+        while _G.__PESONA_AD == GEN do
+            if CFG.auto then pcall(fn) end
+            task.wait(type(interval) == "function" and interval() or interval)
         end
-        task.wait(5)
-    end
-end)
-
-task.spawn(function()
-    while _G.__PESONA_AD == GEN do
-        if CFG.auto and CFG.autoSell then pcall(doSell) end
-        task.wait(4)
-    end
-end)
-
-task.spawn(function()
-    while _G.__PESONA_AD == GEN do
-        if CFG.auto and (CFG.autoGrade or CFG.autoTrait) then pcall(doRerolls) end
-        task.wait(4)
-    end
-end)
-
-task.spawn(function()
-    while _G.__PESONA_AD == GEN do
-        if CFG.auto and CFG.autoTower then pcall(towerRun) else task.wait(2) end
-        task.wait(2)
-    end
-end)
-
-task.spawn(function()
-    while _G.__PESONA_AD == GEN do
-        if CFG.auto and CFG.autoBoost then pcall(useBoosts) end
-        task.wait(10)
-    end
-end)
-
-task.spawn(function()
-    while _G.__PESONA_AD == GEN do
-        if CFG.auto then
-            ST.phase = "spending"
-            local need = CFG.autoRebirth and nextRebirthCost() or nil
-            if need and data().Money >= need then
-                if CFG.autoDice then pcall(doDice, need) end
-                if CFG.autoUpgrade then pcall(doUpgrade, need) end
-                pcall(doRebirth)
-            else
-                if CFG.autoDice then pcall(doDice) end
-                if CFG.autoUpgrade then pcall(doUpgrade) end
-            end
-            if CFG.autoLevel then pcall(levelSlots) end
-        else
-            ST.phase = "idle"
-        end
-        task.wait(3)
-    end
-end)
-
-task.spawn(function()
-    while _G.__PESONA_AD == GEN do
-        if CFG.auto and CFG.autoCodes then pcall(doCodes) end
-        if CFG.auto and CFG.autoClaims then pcall(doClaims) end
-        task.wait(30)
-    end
-end)
-
--- snapshot + status refresh
--- [M-4] fix: improved invHash to avoid trivial collisions
-local LAST_INV_HASH, LAST_T
-local function invHash()
-    local d = data()
-    local inv = d.Inventory or {}
-    local parts = {}
-    for k, v in pairs(inv) do
-        parts[#parts+1] = tostring(k) .. ":" .. tostring(v.amount or v.name or "")
-    end
-    table.sort(parts)
-    return table.concat(parts, "|")
+    end)
 end
 
+loop(rollInterval, function() if CFG.autoRoll then doRoll() end end)
+loop(5,  function() if CFG.autoCollect or CFG.autoPlace then doCollectPlace() end end)
+loop(4,  function() if CFG.autoSell then doSell() end end)
+loop(4,  function() if CFG.autoGrade or CFG.autoTrait then doRerolls() end end)
+loop(4,  function() if CFG.autoTower then towerRun() end end)
+loop(10, function() if CFG.autoBoost then useBoosts() end end)
+loop(10, function() if CFG.autoEvent then doEvent() end end)
+loop(30, function()
+    if CFG.autoCodes then doCodes() end
+    if CFG.autoClaims then doClaims() end
+end)
+loop(3, function()
+    local need = CFG.autoRebirth and nextRebirthCost() or nil
+    if need and data().Money < need then need = nil end       -- not affordable yet: spend freely
+    if CFG.autoDice then pcall(doDice, need) end
+    if CFG.autoUpgrade then pcall(doUpgrade, need) end
+    if need then pcall(doRebirth) end
+    if CFG.autoLevel then pcall(levelSlots) end
+end)
+
+-- status line (runs even when the farm is stopped)
 task.spawn(function()
     while _G.__PESONA_AD == GEN do
-        local d = data()
-        if d then
-            ST.money    = d.Money or 0
-            ST.rolls    = d.Rolls or 0
-            ST.rebirth  = d.Rebirth or 0
-            ST.dice     = d.Dice or "-"
-            ST.slotsMax = unlockedSlots()
-            ST.invCap   = invCap()
-
-            local filled, units = 0, 0
-            local slots = d.Slots or {}
+        pcall(function()
+            local d = data()
+            if not d then return end
+            local inv, slots = d.Inventory or {}, d.Slots or {}
+            local filled, income = 0, 0
             for _, slot in pairs(slots) do
-                if slot.unitId then filled = filled + 1 end
-            end
-            local inv = d.Inventory or {}
-            for _, u in pairs(inv) do
-                if UnitConfig and UnitConfig.entries and UnitConfig.entries[u.name] then
-                    units = units + 1
+                if slot.unitId then
+                    filled = filled + 1
+                    if inv[slot.unitId] then income = income + baseIncome(inv[slot.unitId]) end
                 end
             end
-            ST.slots = filled
-            ST.inv  = units
-            ST.luck = rollLuck()
-
-            -- compute ST.income from placed slots
-            local totalIncome = 0
-            for _, slot in pairs(slots) do
-                if slot.unitId and inv[slot.unitId] then
-                    totalIncome = totalIncome + baseIncome(inv[slot.unitId])
-                end
-            end
-            ST.income = totalIncome
-
-            -- perf: skip snapshot work if inventory unchanged
-            local curHash = invHash()
-            if curHash == LAST_INV_HASH and LAST_T then
-                -- still do ST.money reassign (may have changed)
-            end
-            LAST_INV_HASH = curHash
-            task.wait(1)
-            LAST_T = true                                          -- [M-5] fix: was task.wait(1) return value
-        end
-        if ui and ui.status then
             ui.status.Text = string.format(
-                "money %s | income %s/s | rb %d | slots %d/%d | die %s | luck %.1f",
-                fmt(ST.money), fmt(ST.income), ST.rebirth,
-                ST.slots, ST.slotsMax, ST.dice, ST.luck
+                "$%s  +%s/s  RB %d\nslot %d/%d  %s  luck %.1f\nroll %s  sold %s  tower %d",
+                fmt(d.Money), fmt(income), d.Rebirth or 0,
+                filled, unlockedSlots(), tostring(d.Dice or "-"):sub(1, 12), rollLuck(),
+                fmt(ST.rolled), fmt(ST.sold), ST.towerBest
             )
-        end
+        end)
+        task.wait(1)   -- outside the nil check: the old loop never yielded when data() was nil and froze the client
     end
 end)
 
-print("[PESONA] Anime Dice Auto Farm v4 loaded. Flip START to begin.")  -- [L-2] fix: v3→v4
+print("[PESONA] Anime Dice Auto Farm v5 loaded. Flip START to begin.")
