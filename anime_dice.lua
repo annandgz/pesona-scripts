@@ -1,4 +1,11 @@
 --====================================================================
+--  LENHUB — Anime Dice Auto Farm (v6)
+--  Place: 113290951185459   Universe: 10708913337
+--  WindUI (Footagesus) edition · 3 tabs · sliders · live status
+--  Derived from reverse-engineered Network tree + DataController.___X
+--====================================================================
+
+--====================================================================
 --  ANIME DICE — PESONA AUTO FARM (v4, Delta-ready)              -- [L-2] fix: v3→v4
 --  Place: 113290951185459   Universe: 10708913337
 --  Derived from reverse-engineered Network tree + DataController.___X
@@ -828,12 +835,12 @@ local function buildWindUI()
     end
 
     local Window = WindUI:CreateWindow({
-        Title = "ANIME DICE • PESONA",
-        Folder = "pesona_ad",
+        Title = "ANIME DICE • LENHUB",
+        Folder = "lenhub",
         Icon = "solar:folder-2-bold-duotone",
         NewElements = true,
         OpenButton = {
-            Title = "ANIME DICE",
+            Title = "LENHUB",
             CornerRadius = UDim.new(1, 0),
             StrokeThickness = 3,
             Enabled = true,
@@ -1001,7 +1008,7 @@ local function buildWindUI()
     ToolsTab:Space()
     ToolsTab:Section({ Title = "About", TextSize = 14 })
     ToolsTab:Paragraph({
-        Title = "Anime Dice — PESONA Auto Farm v6",
+        Title = "Anime Dice — LENHUB Auto Farm v6",
         Desc = "WindUI edition · closing the window keeps the farm running · use the master toggle to stop",
         TextSize = 13,
     })
@@ -1012,7 +1019,7 @@ end
 -- minimal fallback in case WindUI cannot be fetched (offline, HttpGet blocked)
 local function buildFallbackUI()
     local sg = Instance.new("ScreenGui")
-    sg.Name = "PesonaAnimeDice"
+    sg.Name = "LENHUB"
     sg.ResetOnSpawn = false
     sg.Parent = LP:WaitForChild("PlayerGui")
     _G.__PESONA_AD_GUI = sg
