@@ -809,192 +809,254 @@ end
 
 --====================================================================
 --  GUI   (v5: compact, everything below the title bar lives in `body`)
+local WINDUI_URL = "https://raw.githubusercontent.com/Footagesus/WindUI/main/dist/main.lua"
+
 --====================================================================
-local function buildGUI()
-    local W, TITLE_H, FULL_H = 230, 28, 310      -- fits a 320px-tall phone screen
-    local ON   = Color3.fromRGB(0, 150, 110)
-    local OFF  = Color3.fromRGB(38, 42, 58)
-    local DEAD = Color3.fromRGB(60, 34, 34)
-    local WHITE = Color3.new(1, 1, 1)
-
-    local function mk(class, props, parent)
-        local o = Instance.new(class)
-        for k, v in pairs(props) do o[k] = v end
-        o.Parent = parent
-        return o
-    end
-    local function round(o, r) mk("UICorner", { CornerRadius = UDim.new(0, r) }, o) end
-
-    local sg = mk("ScreenGui", {
-        Name = "PesonaAnimeDice", ResetOnSpawn = false, ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
-    }, LP:WaitForChild("PlayerGui"))
-    _G.__PESONA_AD_GUI = sg
-
-    local main = mk("Frame", {
-        Size = UDim2.new(0, W, 0, FULL_H), Position = UDim2.new(0, 12, 0.5, -FULL_H / 2),
-        BackgroundColor3 = Color3.fromRGB(16, 18, 26), BorderSizePixel = 0,
-        Active = true, ClipsDescendants = true,
-    }, sg)
-    round(main, 8)
-    mk("UIStroke", { Color = Color3.fromRGB(0, 220, 255), Thickness = 1.5 }, main)
-
-    -- title bar: the only things parented to `main` besides `body`
-    local title = mk("TextLabel", {
-        Size = UDim2.new(1, -64, 0, TITLE_H), Position = UDim2.new(0, 8, 0, 0),
-        BackgroundTransparency = 1, Active = true,
-        Text = "ANIME DICE • PESONA", TextColor3 = Color3.fromRGB(0, 220, 255),
-        Font = Enum.Font.GothamBold, TextSize = 13, TextXAlignment = Enum.TextXAlignment.Left,
-    }, main)
-    local function titleBtn(text, x, color)
-        return mk("TextButton", {
-            Size = UDim2.new(0, 28, 0, TITLE_H), Position = UDim2.new(1, x, 0, 0),
-            BackgroundTransparency = 1, Text = text, TextColor3 = color,
-            Font = Enum.Font.GothamBold, TextSize = 18,
-        }, main)
-    end
-    local minBtn   = titleBtn("−", -58, WHITE)
-    local closeBtn = titleBtn("×", -28, Color3.new(1, 0.5, 0.5))
-
-    local body = mk("Frame", {
-        Size = UDim2.new(1, 0, 1, -TITLE_H), Position = UDim2.new(0, 0, 0, TITLE_H),
-        BackgroundTransparency = 1,
-    }, main)
-
-    -- drag by the title; movement tracked on UIS so a fast drag does not drop
-    local dragInput, dragStart, startPos
-    title.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            dragInput, dragStart, startPos = input, input.Position, main.Position
-            input.Changed:Connect(function()
-                if input.UserInputState == Enum.UserInputState.End then dragInput = nil end
-            end)
-        end
+--  GUI   (v6: WindUI — https://github.com/Footagesus/WindUI)
+--  UI loads from WindUI dist; on failure falls back to a minimal
+--  built-in ScreenGui so the farm always stays controllable.
+--  Closing the window no longer kills the farm: the master toggle
+--  controls start/stop, and the OpenButton reopens the panel.
+--====================================================================
+local function buildWindUI()
+    local ok, WindUI = pcall(function()
+        return loadstring(game:HttpGet(WINDUI_URL))()
     end)
-    local moveConn = UIS.InputChanged:Connect(function(input)
-        if dragInput and (input == dragInput or input.UserInputType == Enum.UserInputType.MouseMovement) then
-            local delta = input.Position - dragStart
-            main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X,
-                                      startPos.Y.Scale, startPos.Y.Offset + delta.Y)
-        end
-    end)
-    sg.Destroying:Connect(function() moveConn:Disconnect() end)
-
-    -- minimize: the old START button was anchored to the bottom of `main`, so when the
-    -- window collapsed it slid over the title bar and swallowed the tap on "−"
-    local minimized = false
-    minBtn.MouseButton1Click:Connect(function()
-        minimized = not minimized
-        body.Visible = not minimized
-        main.Size = UDim2.new(0, W, 0, minimized and TITLE_H or FULL_H)
-        minBtn.Text = minimized and "+" or "−"
-    end)
-
-    -- close also stops every loop (before: GUI gone, farm kept running with no way to stop it)
-    closeBtn.MouseButton1Click:Connect(function()
-        CFG.auto = false
-        if _G.__PESONA_AD == GEN then _G.__PESONA_AD = GEN + 1 end
-        _G.__PESONA_AD_GUI = nil
-        sg:Destroy()
-    end)
-
-    local status = mk("TextLabel", {
-        Size = UDim2.new(1, -12, 0, 42), Position = UDim2.new(0, 6, 0, 0),
-        BackgroundColor3 = Color3.fromRGB(22, 26, 38), Text = "loading...",
-        TextColor3 = Color3.fromRGB(180, 220, 255), Font = Enum.Font.Code, TextSize = 11,
-    }, body)
-    round(status, 6)
-
-    local list = mk("ScrollingFrame", {
-        Size = UDim2.new(1, -12, 1, -88), Position = UDim2.new(0, 6, 0, 46),
-        BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 4,
-        CanvasSize = UDim2.new(0, 0, 0, 0),
-    }, body)
-    local ll = mk("UIListLayout", { Padding = UDim.new(0, 3), SortOrder = Enum.SortOrder.LayoutOrder }, list)
-    ll:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
-        list.CanvasSize = UDim2.new(0, 0, 0, ll.AbsoluteContentSize.Y + 4)
-    end)
-
-    local order = 0
-    local function row(text, color)
-        order = order + 1
-        local b = mk("TextButton", {
-            Size = UDim2.new(1, -6, 0, 22), BackgroundColor3 = color, Text = text,
-            TextColor3 = WHITE, Font = Enum.Font.Gotham, TextSize = 12,
-            TextXAlignment = Enum.TextXAlignment.Left, LayoutOrder = order,
-        }, list)
-        round(b, 5)
-        return b
+    if not ok or type(WindUI) ~= "table" or type(WindUI.CreateWindow) ~= "function" then
+        warn("[PESONA] WindUI load failed: " .. tostring(WindUI) .. " — using fallback UI")
+        return nil
     end
 
-    local function addToggle(label, key)
+    local Window = WindUI:CreateWindow({
+        Title = "ANIME DICE • PESONA",
+        Folder = "pesona_ad",
+        Icon = "solar:folder-2-bold-duotone",
+        NewElements = true,
+        OpenButton = {
+            Title = "ANIME DICE",
+            CornerRadius = UDim.new(1, 0),
+            StrokeThickness = 3,
+            Enabled = true,
+            Draggable = true,
+            Scale = 0.5,
+            Color = ColorSequence.new(
+                Color3.fromHex("#30FF6A"),
+                Color3.fromHex("#e7ff2f")
+            ),
+        },
+        Topbar = { Height = 44, ButtonsType = "Mac" },
+    })
+    _G.__PESONA_AD_GUI = Window
+
+    pcall(function()
+        Window:Tag({ Title = "v6 • WindUI", Icon = "github", Color = Color3.fromHex("#1c1c1c"), Border = true })
+    end)
+
+    local Green  = Color3.fromHex("#10C550")
+    local Blue   = Color3.fromHex("#257AF7")
+    local Yellow = Color3.fromHex("#ECA201")
+
+    -- */ Auto Farm tab /* --
+    local FarmTab = Window:Tab({
+        Title = "Auto Farm",
+        Icon = "solar:check-square-bold",
+        IconColor = Green,
+        IconShape = "Square",
+        Border = true,
+    })
+
+    FarmTab:Section({ Title = "Master", TextSize = 14 })
+    FarmTab:Toggle({
+        Title = "AUTO FARM",
+        Desc = "Starts/stops every enabled loop",
+        Value = CFG.auto,
+        Callback = function(v) CFG.auto = v end,
+    })
+    FarmTab:Space()
+    FarmTab:Section({ Title = "Features", TextSize = 14 })
+
+    local TOGGLE_DEFS = {
+        { "Auto Roll",         "autoRoll",    "Roll the dice continuously" },
+        { "Auto Spin",         "autoSpins",   "Use spin items when free" },
+        { "Auto Collect",      "autoCollect", "Bank slot balances" },
+        { "Auto Place",        "autoPlace",   "Equip best units in slots" },
+        { "Auto Level",        "autoLevel",   "Level units (payback capped)" },
+        { "Auto Buy Dice",     "autoDice",    "Buy best affordable dice" },
+        { "Auto Upgrade",      "autoUpgrade", "Buy cheapest upgrade tier" },
+        { "Auto Rebirth",      "autoRebirth", "Rebirth when affordable" },
+        { "Auto Sell Junk",    "autoSell",    "Sell low-rarity units" },
+        { "Auto Tower",        "autoTower",   "Run tower automatically" },
+        { "Auto Boost",        "autoBoost",   "Use luck/money boosts" },
+        { "Auto Grade Reroll", "autoGrade",   "Reroll weak grades (gems)" },
+        { "Auto Trait Reroll", "autoTrait",   "Reroll weak traits" },
+        { "Auto Codes",        "autoCodes",   "Redeem all known codes" },
+        { "Auto Claims",       "autoClaims",  "Claim offline/daily/group" },
+        { "Auto Event",        "autoEvent",   "Fire event remotes (if set)" },
+    }
+    for _, def in ipairs(TOGGLE_DEFS) do
+        local label, key, desc = def[1], def[2], def[3]
         local missing = missingFor(key)
         local locked = not GRANTED_FEATURES[key] and table.find(GATED_FEATURES, key) ~= nil
         if missing or locked then
             CFG[key] = false
-            row("  " .. label .. (missing and "  [N/A]" or "  [LOCKED]"), DEAD).AutoButtonColor = false
-            if missing then warn("[PESONA] " .. label .. " disabled — missing: " .. missing) end
-            return
+            FarmTab:Toggle({
+                Title = label,
+                Desc = missing and ("Disabled — missing: " .. missing) or "Locked by license",
+                Value = false,
+                Locked = true,
+                LockedTitle = missing or "Locked",
+            })
+        else
+            FarmTab:Toggle({
+                Title = label,
+                Desc = desc,
+                Value = CFG[key],
+                Callback = function(v) CFG[key] = v end,
+            })
         end
-        local b = row("", OFF)
-        local function paint()
-            b.BackgroundColor3 = CFG[key] and ON or OFF
-            b.Text = "  " .. label .. (CFG[key] and "  [ON]" or "  [OFF]")
-        end
-        paint()
-        b.MouseButton1Click:Connect(function()
-            CFG[key] = not CFG[key]
-            paint()
-        end)
     end
 
-    for _, item in ipairs({
-        { "Auto Roll",         "autoRoll" },
-        { "Auto Spin",         "autoSpins" },
-        { "Auto Collect",      "autoCollect" },
-        { "Auto Place",        "autoPlace" },
-        { "Auto Level",        "autoLevel" },
-        { "Auto Buy Dice",     "autoDice" },
-        { "Auto Upgrade",      "autoUpgrade" },
-        { "Auto Rebirth",      "autoRebirth" },
-        { "Auto Sell Junk",    "autoSell" },
-        { "Auto Tower",        "autoTower" },
-        { "Auto Boost",        "autoBoost" },
-        { "Auto Grade Reroll", "autoGrade" },
-        { "Auto Trait Reroll", "autoTrait" },
-        { "Auto Codes",        "autoCodes" },
-        { "Auto Claims",       "autoClaims" },
-        { "Auto Event",        "autoEvent" },
-    }) do
-        addToggle(item[1], item[2])
-    end
+    -- */ Config tab /* --
+    local ConfigTab = Window:Tab({
+        Title = "Config",
+        Icon = "solar:file-text-bold",
+        IconColor = Blue,
+        IconShape = "Square",
+        Border = true,
+    })
+    ConfigTab:Section({ Title = "Selling", TextSize = 14 })
+    ConfigTab:Slider({
+        Title = "Sell Below Rarity",
+        Desc = "Common=1 … Exotic=8",
+        Step = 1,
+        Value = { Min = 1, Max = 8, Default = CFG.sellRarity },
+        IsTooltip = true,
+        Callback = function(v) CFG.sellRarity = v end,
+    })
+    ConfigTab:Slider({
+        Title = "Keep Best",
+        Desc = "Never sell the N best units",
+        Step = 1,
+        Value = { Min = 0, Max = 100, Default = CFG.keepBest },
+        IsTooltip = true,
+        Callback = function(v) CFG.keepBest = v end,
+    })
+    ConfigTab:Space()
+    ConfigTab:Section({ Title = "Rerolls", TextSize = 14 })
+    ConfigTab:Slider({
+        Title = "Grade Min Multiplier",
+        Step = 0.1,
+        Value = { Min = 0, Max = 10, Default = CFG.gradeMin },
+        IsTooltip = true,
+        Callback = function(v) CFG.gradeMin = v end,
+    })
+    ConfigTab:Slider({
+        Title = "Trait Min Multiplier",
+        Step = 0.1,
+        Value = { Min = 0, Max = 5, Default = CFG.traitMin },
+        IsTooltip = true,
+        Callback = function(v) CFG.traitMin = v end,
+    })
+    ConfigTab:Space()
+    ConfigTab:Section({ Title = "Leveling", TextSize = 14 })
+    ConfigTab:Slider({
+        Title = "Level Money Share %",
+        Step = 1,
+        Value = { Min = 0, Max = 100, Default = math.floor(CFG.levelShare * 100) },
+        IsTooltip = true,
+        Callback = function(v) CFG.levelShare = v / 100 end,
+    })
+    ConfigTab:Slider({
+        Title = "Level Payback Cap (min)",
+        Step = 1,
+        Value = { Min = 1, Max = 120, Default = CFG.levelPayback },
+        IsTooltip = true,
+        Callback = function(v) CFG.levelPayback = v end,
+    })
 
-    local dumpBtn = row("  Dump Remotes (for event)", Color3.fromRGB(60, 60, 110))
-    dumpBtn.MouseButton1Click:Connect(function()
-        local ok, n, copied = pcall(dumpRemotes)
-        dumpBtn.Text = ok and ("  Dumped " .. n .. (copied and " → clipboard" or " → console"))
-            or "  Dump failed (see console)"
-        if not ok then warn("[PESONA] dump failed: " .. tostring(n)) end
-    end)
+    -- */ Tools tab /* --
+    local ToolsTab = Window:Tab({
+        Title = "Tools",
+        Icon = "solar:cursor-square-bold",
+        IconColor = Yellow,
+        IconShape = "Square",
+        Border = true,
+    })
+    ToolsTab:Section({ Title = "Live Status", TextSize = 14 })
+    local statusEl = ToolsTab:Paragraph({
+        Title = "loading...",
+        TextSize = 14,
+    })
+    ToolsTab:Space()
+    ToolsTab:Section({ Title = "Event Remotes", TextSize = 14 })
+    ToolsTab:Button({
+        Title = "Dump Remotes",
+        Desc = "List unused Network remotes → console + clipboard",
+        Icon = "copy",
+        Callback = function()
+            local ok2, n, copied = pcall(dumpRemotes)
+            if not ok2 then warn("[PESONA] dump failed: " .. tostring(n)) end
+        end,
+    })
+    ToolsTab:Space()
+    ToolsTab:Section({ Title = "About", TextSize = 14 })
+    ToolsTab:Paragraph({
+        Title = "Anime Dice — PESONA Auto Farm v6",
+        Desc = "WindUI edition · closing the window keeps the farm running · use the master toggle to stop",
+        TextSize = 13,
+    })
 
-    local master = mk("TextButton", {
-        Size = UDim2.new(1, -12, 0, 32), Position = UDim2.new(0, 6, 1, -38),
-        BackgroundColor3 = Color3.fromRGB(0, 170, 90), Text = "START AUTO FARM",
-        TextColor3 = WHITE, Font = Enum.Font.GothamBold, TextSize = 14,
-    }, body)
-    round(master, 6)
-    master.MouseButton1Click:Connect(function()
+    return { win = Window, statusEl = statusEl }
+end
+
+-- minimal fallback in case WindUI cannot be fetched (offline, HttpGet blocked)
+local function buildFallbackUI()
+    local sg = Instance.new("ScreenGui")
+    sg.Name = "PesonaAnimeDice"
+    sg.ResetOnSpawn = false
+    sg.Parent = LP:WaitForChild("PlayerGui")
+    _G.__PESONA_AD_GUI = sg
+
+    local main = Instance.new("Frame")
+    main.Size = UDim2.new(0, 210, 0, 96)
+    main.Position = UDim2.new(0, 12, 0.5, -48)
+    main.BackgroundColor3 = Color3.fromRGB(16, 18, 26)
+    main.Parent = sg
+
+    local status = Instance.new("TextLabel")
+    status.Size = UDim2.new(1, -8, 0, 44)
+    status.Position = UDim2.new(0, 4, 0, 4)
+    status.BackgroundTransparency = 1
+    status.Text = "loading..."
+    status.TextColor3 = Color3.fromRGB(180, 220, 255)
+    status.Font = Enum.Font.Code
+    status.TextSize = 11
+    status.TextXAlignment = Enum.TextXAlignment.Left
+    status.Parent = main
+
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1, -8, 0, 38)
+    btn.Position = UDim2.new(0, 4, 0, 52)
+    btn.BackgroundColor3 = Color3.fromRGB(0, 170, 90)
+    btn.Text = "START AUTO FARM"
+    btn.TextColor3 = Color3.new(1, 1, 1)
+    btn.Font = Enum.Font.GothamBold
+    btn.TextSize = 13
+    btn.Parent = main
+
+    btn.MouseButton1Click:Connect(function()
         CFG.auto = not CFG.auto
-        master.BackgroundColor3 = CFG.auto and Color3.fromRGB(180, 40, 40) or Color3.fromRGB(0, 170, 90)
-        master.Text = CFG.auto and "STOP AUTO FARM" or "START AUTO FARM"
+        btn.BackgroundColor3 = CFG.auto and Color3.fromRGB(180, 40, 40) or Color3.fromRGB(0, 170, 90)
+        btn.Text = CFG.auto and "STOP AUTO FARM" or "START AUTO FARM"
     end)
 
-    return { sg = sg, status = status }
+    return { win = sg, statusEl = status }
 end
 
 --====================================================================
 --  LOOPS
 --====================================================================
-local ui = buildGUI()
+local ui = buildWindUI() or buildFallbackUI()
 
 local function loop(interval, fn)
     task.spawn(function()
@@ -1039,15 +1101,20 @@ task.spawn(function()
                     if inv[slot.unitId] then income = income + baseIncome(inv[slot.unitId]) end
                 end
             end
-            ui.status.Text = string.format(
+            local text = string.format(
                 "$%s  +%s/s  RB %d\nslot %d/%d  %s  luck %.1f\nroll %s  sold %s  tower %d",
                 fmt(d.Money), fmt(income), d.Rebirth or 0,
                 filled, unlockedSlots(), tostring(d.Dice or "-"):sub(1, 12), rollLuck(),
                 fmt(ST.rolled), fmt(ST.sold), ST.towerBest
             )
+            if type(ui.statusEl) == "table" and type(ui.statusEl.SetTitle) == "function" then
+                pcall(function() ui.statusEl:SetTitle(text) end)
+            elseif ui.statusEl.Text then
+                ui.statusEl.Text = text
+            end
         end)
         task.wait(1)   -- outside the nil check: the old loop never yielded when data() was nil and froze the client
     end
 end)
 
-print("[PESONA] Anime Dice Auto Farm v5 loaded. Flip START to begin.")
+print("[PESONA] Anime Dice Auto Farm v6 (WindUI) loaded. Open the panel and flip AUTO FARM.")
